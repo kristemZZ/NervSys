@@ -3,20 +3,26 @@
 /**
  * Redis Queue Extension
  *
- * Copyright 2017 Jerry Shaw <jerry-shaw@live.com>
- * Copyright 2017-2018 秋水之冰 <27206617@qq.com>
+ * Author Jerry Shaw <jerry-shaw@live.com>
+ * Author 秋水之冰 <27206617@qq.com>
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Copyright 2017 Jerry Shaw
+ * Copyright 2018 秋水之冰
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * This file is part of NervSys.
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * NervSys is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * NervSys is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with NervSys. If not, see <http://www.gnu.org/licenses/>.
  */
 
 namespace ext;
@@ -38,23 +44,24 @@ class redis_queue extends redis
      * It is very useful facing huge queue list.
      *
      * Recommended:
-     * Method "run" is fully ready for use, but is kept away from directly calling.
+     * Method "run" is ready for use, but is kept away from directly calling.
      * TrustZone is closed in extensions, you can always call it from your own codes.
+     *
+     * @var string
      */
     public static $cmd = '';
 
-    //Queue failed key (list)
-    public static $key_fail = 'queue:fail';
+    //Main process key
+    public static $key_main = 'main';
 
-    //Queue list prefix (list)
-    public static $prefix_list = 'queue:list:';
+    //Queue failed key
+    public static $fail_list = 'queue:fail';
 
-    //Queue process prefix (kv)
+    //Queue list prefix
+    public static $prefix_queue = 'queue:list:';
+
+    //Queue process prefix
     public static $prefix_process = 'queue:process:';
-
-    //Queue watch keys (hash)
-    public static $key_watch_list    = 'queue:watch:list';
-    public static $key_watch_process = 'queue:watch:process';
 
     //Queue scan wait (in seconds)
     public static $scan_wait = 60;
@@ -65,33 +72,35 @@ class redis_queue extends redis
     //Max running clients
     public static $max_runs = 5;
 
-    //Max executed counts
-    public static $max_execute = 200;
+    //Max operations
+    public static $max_opts = 200;
+
+    //Redis connection
+    private static $redis = null;
+
+    //OS Variables
+    private static $os_env = [];
 
     /**
-     * Get active keys
+     * Scan for keys
      *
-     * @param string $key
+     * @param string $pattern
      *
      * @return array
-     * @throws \Exception
      */
-    private static function get_keys(string $key): array
+    private static function get_keys(string $pattern): array
     {
-        if (!self::connect()->exists($key)) return [];
+        $list = [];
+        $start = $offset = null;
 
-        $keys = self::connect()->hGetAll($key);
-        if (empty($keys)) return [];
+        do {
+            $offset = $start;
+            $keys = self::$redis->scan($start, $pattern, self::$max_runs);
+            if (false !== $keys) foreach ($keys as $key) $list[] = $key;
+        } while (0 < $start && $offset !== $start);
 
-        foreach ($keys as $k => $v) {
-            if (!self::connect()->exists($k)) {
-                self::connect()->hDel($key, $k);
-                unset($keys[$k]);
-            }
-        }
-
-        unset($key, $k, $v);
-        return $keys;
+        unset($pattern, $start, $offset, $keys, $key);
+        return $list;
     }
 
     /**
@@ -106,17 +115,12 @@ class redis_queue extends redis
      */
     public static function add(string $key, array $data): int
     {
-        //Command should always exist
         if (!isset($data['c']) && !isset($data['cmd'])) return 0;
 
-        //Queue list key
-        $list_key = self::$prefix_list . $key;
+        if (is_null(self::$redis)) self::$redis = parent::connect();
+        $add = (int)self::$redis->lPush(self::$prefix_queue . $key, json_encode($data));
 
-        //Add to watch list & queue list
-        self::connect()->hSet(self::$key_watch_list, $list_key, time());
-        $add = (int)self::connect()->lPush($list_key, json_encode($data));
-
-        unset($key, $data, $list_key);
+        unset($key, $data);
         return $add;
     }
 
@@ -131,11 +135,10 @@ class redis_queue extends redis
      */
     public static function stop(string $key = ''): int
     {
-        $process = '' === $key ? array_keys(self::show_process()) : [self::$prefix_process . $key];
-        if (empty($process)) return 0;
+        if (is_null(self::$redis)) self::$redis = parent::connect();
 
-        $result = call_user_func_array([self::connect(), 'del'], $process);
-        call_user_func_array([self::connect(), 'hDel'], array_unshift($process, self::$key_watch_process));
+        $process = '' === $key ? array_keys(self::process_list()) : [self::$prefix_process . $key];
+        $result = 0 < count($process) ? call_user_func_array([self::$redis, 'del'], $process) : 0;
 
         unset($key, $process);
         return $result;
@@ -145,22 +148,32 @@ class redis_queue extends redis
      * Show process list
      *
      * @return array
-     * @throws \Exception
      */
-    public static function show_process(): array
+    public static function process_list(): array
     {
-        return self::get_keys(self::$key_watch_process);
+        $list = [];
+
+        $keys = self::get_keys(self::$prefix_process . '*');
+        foreach ($keys as $key) $list[$key] = self::$redis->get($key);
+
+        unset($keys, $key);
+        return $list;
     }
 
     /**
      * Show queue list
      *
      * @return array
-     * @throws \Exception
      */
-    public static function show_queue(): array
+    public static function queue_list(): array
     {
-        return self::get_keys(self::$key_watch_list);
+        $list = [];
+
+        $keys = self::get_keys(self::$prefix_queue . '*');
+        foreach ($keys as $key) $list[$key] = self::$redis->lLen($key);
+
+        unset($keys, $key);
+        return $list;
     }
 
     /**
@@ -172,19 +185,21 @@ class redis_queue extends redis
      * @return array
      * @throws \Exception
      */
-    public static function show_fail(int $start = 0, int $end = -1): array
+    public static function fail_list(int $start = 0, int $end = -1): array
     {
         $list = [];
 
-        $list['len'] = self::connect()->lLen(self::$key_fail);
-        $list['data'] = self::connect()->lRange(self::$key_fail, $start, $end);
+        if (is_null(self::$redis)) self::$redis = parent::connect();
+
+        $list['len'] = self::$redis->lLen(self::$fail_list);
+        $list['data'] = self::$redis->lRange(self::$fail_list, $start, $end);
 
         unset($start, $end);
         return $list;
     }
 
     /**
-     * Start root process
+     * Start main process
      *
      * @throws \Exception
      */
@@ -193,61 +208,62 @@ class redis_queue extends redis
         //Only support CLI
         if ('cli' !== PHP_SAPI) exit;
 
-        //Root process key
-        $root_key = self::$prefix_process . 'root';
+        //Get OS Variables
+        self::$os_env = os::get_env();
 
-        //Exit when root process is running
-        if (self::connect()->exists($root_key)) exit;
+        //Connect Redis
+        if (is_null(self::$redis)) self::$redis = parent::connect();
+
+        //Main process key
+        $main_key = self::$prefix_process . self::$key_main;
+
+        //Exit when main process is running
+        if (self::$redis->exists($main_key)) exit;
 
         //Set lifetime
         $time_wait = (int)(self::$scan_wait / 2);
-        self::connect()->set($root_key, time(), self::$scan_wait);
+        self::$redis->set($main_key, time(), self::$scan_wait);
 
-        //Add to watch list
-        self::connect()->hSet(self::$key_watch_process, $root_key, time());
-
-        //Operation counter
-        $counter = 0;
+        //Operations
+        $operations = 0;
 
         //Start
         do {
             //Read list
-            $list = self::show_queue();
+            $list = self::queue_list();
 
             //Idle wait on no job
             if (empty($list)) {
-                //Renew root process
-                $renew = self::connect()->expire($root_key, self::$scan_wait);
+                //Renew main process
+                $renew = self::$redis->expire($main_key, self::$scan_wait);
 
                 //Sleep for Idle
                 sleep(self::$idle_wait);
 
-                //Reset operation counter
-                $counter = 0;
+                //Reset operations
+                $operations = 0;
                 continue;
             }
 
             //Listen
-            $queue = self::connect()->brPop(array_keys($list), $time_wait);
+            $queue = self::$redis->brPop(array_keys($list), $time_wait);
 
             //Process
             if (is_array($queue)) {
-                ++$counter;
+                ++$operations;
                 self::exec_queue($queue[1]);
-                self::connect()->lRem($queue[0], $queue[1]);
-            } else $counter = 0;
+            } else $operations = 0;
 
             //Too many jobs
-            if (0 < $counter && 0 === $counter % self::$max_execute && '' !== self::$cmd) self::call_process();
+            if (0 < $operations && 0 === $operations % self::$max_opts && '' !== self::$cmd) self::call_process($list);
 
-            //Renew root process
-            $renew = self::connect()->expire($root_key, self::$scan_wait);
+            //Renew main process
+            $renew = self::$redis->expire($main_key, self::$scan_wait);
         } while ($renew);
 
         //On exit
         self::stop();
-
-        unset($root_key, $time_wait, $counter, $list, $queue, $renew);
+        unset($main_key, $time_wait, $operations, $list, $queue, $renew);
     }
 
     /**
@@ -260,88 +276,82 @@ class redis_queue extends redis
         //Only support CLI
         if ('cli' !== PHP_SAPI) exit;
 
+        //Get OS Variables
+        self::$os_env = os::get_env();
+
+        //Connect Redis
+        if (is_null(self::$redis)) self::$redis = parent::connect();
+
         //Process Hash & Key
         $process_hash = hash('md5', uniqid(mt_rand(), true));
         $process_key = self::$prefix_process . $process_hash;
 
         //Set timeout & lifetime
         $time_wait = (int)(self::$scan_wait / 2);
-        self::connect()->set($process_key, 0, self::$scan_wait);
-
-        //Add to watch list
-        self::connect()->hSet(self::$key_watch_process, $process_key, time());
+        self::$redis->set($process_key, 0, self::$scan_wait);
 
         //Run
         do {
-            //Get queue list
-            $list = self::show_queue();
+            //Get queue list keys
+            $list = array_keys(self::queue_list());
 
             //Exit on no job
             if (empty($list)) break;
 
             //Listen
-            $queue = self::connect()->brPop(array_keys($list), $time_wait);
+            $queue = self::$redis->brPop($list, $time_wait);
 
             //Execute in mirror process
-            if (is_array($queue)) {
-                self::exec_queue($queue[1]);
-                self::connect()->lRem($queue[0], $queue[1]);
-            }
+            if (is_array($queue)) self::exec_queue($queue[1]);
 
             //Check status & renew process
-            $exist = self::connect()->exists($process_key);
-            $renew = self::connect()->expire($process_key, self::$scan_wait);
-            $executed = $exist ? self::connect()->incr($process_key) : self::$max_execute;
-        } while ($exist && $renew && $executed < self::$max_execute);
+            $exist = self::$redis->exists($process_key);
+            $renew = self::$redis->expire($process_key, self::$scan_wait);
+            $opts = $exist ? self::$redis->incr($process_key) : self::$max_opts;
+        } while ($exist && $renew && $opts < self::$max_opts);
 
         //On exit
         self::stop($process_hash);
-
-        unset($process_hash, $process_key, $time_wait, $list, $queue, $exist, $renew, $executed);
+        unset($process_hash, $process_key, $time_wait, $list, $queue, $exist, $renew, $opts);
     }
 
     /**
      * Call processes
      *
+     * @param array $queue
+     *
      * @throws \Exception
      */
-    private static function call_process(): void
+    private static function call_process(array $queue): void
     {
-        //Get queue list
-        $list = self::show_queue();
-
         //Count jobs
-        $jobs = 0;
-        foreach ($list as $key => $value) $jobs += self::connect()->lLen($key);
-        if (0 === $jobs) return;
+        $jobs = array_sum($queue);
 
         //Read process list
-        $process = self::show_process();
+        $process = self::process_list();
 
-        //Count needed processes
-        $needed = (int)(ceil($jobs / self::$max_execute) - count($process) - 1);
+        //Count needed clients
+        $needed = (int)(ceil($jobs / self::$max_opts) - count($process) - 1);
         if ($needed > self::$max_runs) $needed = self::$max_runs;
 
         //Build command
-        $cmd = os::cmd_bg(os::get_env() . ' ' . ROOT . '/api.php --cmd "' . self::$cmd . '"');
+        $cmd = os::cmd_bg(self::$os_env['PHP_EXE'] . ' ' . ROOT . '/api.php --cmd "' . self::$cmd . '"');
 
         //Run child processes
         for ($i = 0; $i < $needed; ++$i) pclose(popen($cmd, 'r'));
 
-        unset($list, $jobs, $process, $needed, $cmd, $i);
+        unset($queue, $jobs, $process, $needed, $i);
     }
 
     /**
      * Execute queue
      *
      * @param string $data
-     *
-     * @throws \Exception
      */
     private static function exec_queue(string $data): void
     {
         //Execute
-        exec(os::get_env() . ' ' . ROOT . '/api.php --ret --data "' . addcslashes($data, '"') . '"', $output);
+        exec(self::$os_env['PHP_EXE'] . ' ' . ROOT . '/api.php --ret --data "' . addcslashes($data, '"') . '"', $output);
 
         //Check
         foreach ($output as $key => $value) $output[$key] = trim($value);
@@ -356,8 +366,6 @@ class redis_queue extends redis
      *
      * @param string $data
      * @param string $result
-     *
-     * @throws \Exception
      */
     private static function chk_queue(string $data, string $result): void
     {
@@ -371,8 +379,7 @@ class redis_queue extends redis
         if (is_array($json) && true === current($json)) return;
 
         //Save fail list
-        self::connect()->lPush(self::$key_fail, json_encode(['data' => &$data, 'return' => &$result]));
-
+        self::$redis->lPush(self::$fail_list, json_encode(['data' => &$data, 'return' => &$result]));
         unset($data, $result, $json);
     }
 }

@@ -3,20 +3,26 @@
 /**
  * Router Module
  *
- * Copyright 2016-2018 Jerry Shaw <jerry-shaw@live.com>
- * Copyright 2017-2018 秋水之冰 <27206617@qq.com>
+ * Author Jerry Shaw <jerry-shaw@live.com>
+ * Author 秋水之冰 <27206617@qq.com>
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Copyright 2017 Jerry Shaw
+ * Copyright 2018 秋水之冰
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * This file is part of NervSys.
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * NervSys is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * NervSys is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with NervSys. If not, see <http://www.gnu.org/licenses/>.
  */
 
 namespace core\ctr;
@@ -32,12 +38,18 @@ class router
     //Result data
     public static $result = [];
 
+    //Data Structure
+    public static $struct = [];
+
     //Allowed header
     public static $header = [];
 
     //Config settings
     protected static $conf_cgi = [];
     protected static $conf_cli = [];
+
+    //Argument hash
+    private static $argv_hash = '';
 
     //Config file path
     const conf_path = ROOT . '/core/conf.ini';
@@ -52,12 +64,11 @@ class router
         $unit = parse_url($_SERVER['HTTP_ORIGIN']);
         if (!isset($unit['port'])) $unit['port'] = 'https' === $unit['scheme'] ? 443 : 80;
 
-        $cors = realpath(ROOT . '/cors/' . implode('.', $unit) . '.php');
-        if (false === $cors) exit;
+        $file = realpath(ROOT . '/cors/' . implode('.', $unit) . '.php');
+        if (false === $file) exit;
 
-        require $cors;
-
-        unset($unit, $cors);
+        require $file;
+        unset($unit, $file);
 
         header('Access-Control-Allow-Origin: ' . $_SERVER['HTTP_ORIGIN']);
         if (!empty(self::$header)) header('Access-Control-Allow-Headers: ' . implode(', ', self::$header));
@@ -72,16 +83,16 @@ class router
      */
     public static function load_conf(): void
     {
-        $path = realpath(self::conf_path);
-        if (false === $path) return;
+        $conf_path = realpath(self::conf_path);
+        if (false === $conf_path) return;
 
-        $conf = parse_ini_file($path, true);
-        if (false === $conf) return;
+        $config = parse_ini_file($conf_path, true);
+        if (false === $config) return;
 
-        if (isset($conf['CGI'])) self::$conf_cgi = &$conf['CGI'];
-        if (isset($conf['CLI'])) self::$conf_cli = &$conf['CLI'];
+        if (isset($config['CGI'])) self::$conf_cgi = &$config['CGI'];
+        if (isset($config['CLI'])) self::$conf_cli = &$config['CLI'];
 
-        unset($path, $conf);
+        unset($conf_path, $config);
     }
 
     /**
@@ -111,7 +122,6 @@ class router
 
         //Output result
         echo 'cli' !== PHP_SAPI ? $output : $output . PHP_EOL;
-
         unset($output);
     }
 
@@ -135,18 +145,32 @@ class router
      */
     protected static function opt_val(array &$opt, array $keys): array
     {
-        $result = ['get' => false, 'data' => null];
+        $result = ['get' => false, 'data' => ''];
 
         foreach ($keys as $key) {
             if (isset($opt[$key])) {
-                $result['get'] = true;
-                $result['data'] = $opt[$key];
-
+                $result = ['get' => true, 'data' => $opt[$key]];
                 unset($opt[$key]);
             }
         }
 
         unset($keys, $key);
         return $result;
+    }
+
+    /**
+     * Build data structure
+     */
+    protected static function build_struc(): void
+    {
+        $struc = array_keys(self::$data);
+        $hash = hash('sha256', implode('|', $struc));
+
+        if (self::$argv_hash === $hash) return;
+
+        self::$struct = &$struc;
+        self::$argv_hash = &$hash;
+
+        unset($struc, $hash);
     }
 }

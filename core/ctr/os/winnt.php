@@ -3,19 +3,26 @@
 /**
  * winnt Platform Module
  *
- * Copyright 2017-2018 秋水之冰 <27206617@qq.com>
+ * Author Jerry Shaw <jerry-shaw@live.com>
+ * Author 秋水之冰 <27206617@qq.com>
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Copyright 2017 Jerry Shaw
+ * Copyright 2017 秋水之冰
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * This file is part of NervSys.
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * NervSys is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * NervSys is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with NervSys. If not, see <http://www.gnu.org/licenses/>.
  */
 
 namespace core\ctr\os;
@@ -25,26 +32,58 @@ use core\ctr\os, core\ctr\os\lib\cmd;
 class winnt extends os implements cmd
 {
     /**
-     * Get PHP path
+     * Format system output data
+     *
+     * @param array $data
      */
-    public static function php_env(): string
+    private static function format(array &$data): void
     {
-        exec('wmic process where ProcessId="' . getmypid() . '" get ExecutablePath /format:value', $output, $status);
-        if (0 !== $status) throw new \Exception('WinNT: Access denied!');
+        if (empty($data)) return;
 
-        $output = parse_ini_string(implode($output));
-        if (false === $output) throw new \Exception('WinNT: Access denied!');
+        $key = 0;
+        $list = [];
 
-        $env = &$output['ExecutablePath'];
+        foreach ($data as $line) {
+            $line = trim($line);
+            if ('' === $line) {
+                ++$key;
+                continue;
+            }
 
-        unset($output, $status);
-        return '"' . $env . '"';
+            if (false === strpos($line, '=')) continue;
+            list($name, $value) = explode('=', $line, 2);
+            if (!isset($list[$key][$name]) && '' !== $value) $list[$key][$name] = $value;
+        }
+
+        $data = array_values($list);
+        unset($key, $list, $line, $name, $value);
     }
 
     /**
-     * Get system hash
+     * Get PHP environment information
      */
-    public static function sys_hash(): string
+    public static function info_env(): void
+    {
+        exec('wmic process where ProcessId="' . getmypid() . '" get ProcessId, CommandLine, ExecutablePath /format:value', $output, $status);
+        if (0 !== $status) throw new \Exception('WinNT: Access denied!');
+
+        unset($status);
+
+        self::format($output);
+
+        $output = current($output);
+
+        parent::$env['PHP_PID'] = &$output['ProcessId'];
+        parent::$env['PHP_CMD'] = &$output['CommandLine'];
+        parent::$env['PHP_EXE'] = '"' . $output['ExecutablePath'] . '"';
+
+        unset($output, $info);
+    }
+
+    /**
+     * Get System information
+     */
+    public static function info_sys(): void
     {
         $queries = [
             'wmic nic get AdapterType, MACAddress, Manufacturer, Name, PNPDeviceID /format:value',
@@ -61,13 +100,10 @@ class winnt extends os implements cmd
             if (0 !== $status) throw new \Exception('WinNT: Access denied!');
         }
 
-        $output = array_filter($output);
-        $output = array_unique($output);
+        self::format($output);
 
-        $hash = hash('sha256', json_encode($output));
-
-        unset($queries, $output, $query, $status);
-        return $hash;
+        foreach ($output as $key => $value) if (1 < count($value)) parent::$sys[] = $value;
+        unset($queries, $output, $query, $status, $key, $value);
     }
 
     /**
